@@ -1,18 +1,28 @@
 """
 AI Daily Summary Service (Phase 10 -- Shared "Yesterday's Work" Summary).
 
-Structured-first, AI-narrates-only (see 10.2 and 10.4 of
-project_document/ontask-evolution-plan.md):
-- Every hard fact (times, names, task statuses, counts) is already computed by the
-  caller and lives in `StructuredSnapshot`. This service never touches a database
-  and never invents a number -- it only asks the model to narrate what's already
-  there, then validates that the narration didn't smuggle in anything new before
-  handing it back.
-- No recorded work -> short-circuit to a deterministic sentence without calling
-  the AI at all (10.3).
-- If the AI's narrative keeps referencing unknown members or untraceable numbers
-  after one corrective retry, fall back to a deterministic, template-built
-  narrative rather than surfacing a broken or fabricated summary.
+Structured-first, AI-narrates-only (see project_document/update-ai.md's "Source
+of Truth Rules" and 10.2/10.4 of project_document/ontask-evolution-plan.md):
+- Every hard fact (events, times, names, task statuses, counts, invitations,
+  progress values) is already computed by the caller and lives in
+  `StructuredSnapshot`. This service never touches a database and never invents
+  a number or an event -- it only asks the model to narrate what's already
+  there, then validates that the narration didn't smuggle in anything new
+  before handing it back.
+- No recorded activity at all (not just no time -- also no events, no
+  invitations, no membership changes) -> short-circuit to a deterministic
+  sentence without calling the AI at all.
+- If the AI's narrative keeps referencing unknown members or untraceable
+  numbers after one corrective retry, fall back to a deterministic,
+  template-built narrative rather than surfacing a broken or fabricated
+  summary.
+
+completed_work/in_progress/skipped_work groupings and the raw activity bullet
+list the OnTask UI shows per member are NOT produced here -- they're 100%
+derivable from `StructuredSnapshot.members[].task_activity`/`events` directly,
+so the frontend renders them straight from the snapshot. This service's only
+output is prose: an overall summary, a short per-member narrative paragraph,
+and (when relevant) a workspace-changes summary.
 """
 
 import logging
@@ -28,10 +38,11 @@ from src.app.schemas.common import ProviderStatusEventSchema, UsageInfo
 from src.app.schemas.summary import (
     GenerationMetadata,
     MemberEntry,
-    MemberNote,
+    MemberNarrative,
     StructuredSnapshot,
     SummaryGenerateResponse,
     SummaryNarrative,
+    TaskStatus,
 )
 
 logger = logging.getLogger("SummaryService")
@@ -45,20 +56,60 @@ gateway = LLMGateway(
 
 SYSTEM_PROMPT = """You are a neutral reporting assistant for OnTask, a team focus-time tracker.
 
-You will be given a STRUCTURED JSON snapshot of everything a workspace's members focused \
-on during one day. Your ONLY job is to narrate that data in plain, factual prose.
+You will be given a STRUCTURED JSON snapshot of everything that happened in a workspace during \
+one day: what each member created, worked on, was assigned, completed, skipped, and any \
+invitations sent or membership changes. Your job is to turn this into a factual daily work \
+narrative -- "here's what happened in our workspace yesterday" -- NOT a time report and NOT a \
+productivity evaluation.
 
-Hard rules:
-- Summarize ONLY the data given. Never invent a task, member, time value, or status.
-- Never state a number (time, percentage, count) that is not derivable from the JSON.
-- Preserve parent/subtask relationships when describing task groups.
-- Clearly separate completed, in-progress, and skipped work.
-- Use a neutral, factual tone. No productivity judgments ("great job", "behind schedule",
-  "productive", "slacking") unless that exact word appears in the input.
-- No motivational filler, no exclamation marks, no emoji.
-- If activity was minimal or absent for a member, say so plainly instead of padding.
-- Every `user_id` you reference in member_notes MUST be exactly one of the member ids
-  listed in the snapshot. Do not invent member ids.
+What to cover, per member (in `members[].note`):
+- What they created, worked on, completed, or skipped -- named by title.
+- What they were assigned, and what they assigned to others (by name).
+- Any invitations they sent, including the invitation's current status (still pending / accepted
+  / rejected -- never invent or guess a status, and never mention a rejection reason).
+- How task progress changed, ONLY when `task_activity[].progress_start`/`progress_end` are both
+  present for that task -- e.g. "progress moved from 20% to 80%". If only one of those two values
+  is present (or neither), do not state a progress change for that task at all.
+- When a member's `events` show a clear order (e.g. created, then started, then assigned), prefer
+  a natural chronological sentence ("created X, worked on it, then assigned it to Y") over an
+  unordered list of facts.
+- A subtask (an event or task_activity entry with a non-null `parent_title`) should always be
+  described with its parent, e.g. "worked on **Authentication** under **School Management MVP**" --
+  never just the subtask name alone.
+- If a member has no events and no task_activity, say so plainly (e.g. "no recorded activity")
+  instead of padding or omitting them.
+
+Workspace-level activity (in `workspace_changes_summary`): only write this when
+`workspace_changes` in the snapshot is non-empty (has any invitations, joins, removals, or task
+counts) -- 1-2 sentences covering what changed, e.g. task creation/completion counts, members
+joining/leaving. Leave `workspace_changes_summary` as an empty string when there is nothing to
+report there, even if members[] has activity.
+
+Hard rules (violating any of these makes the narrative unusable):
+1. Never invent an event, task, member, time value, or progress value.
+2. Never state a fact (a name, a number, a status, an invitation outcome) that is not present in
+   the snapshot.
+3. Never attribute work to anyone other than the member whose `events`/`task_activity` it appears
+   under -- the snapshot already resolved historical attribution correctly (it reflects who
+   actually did the work that day, not who a task is currently assigned to); do not second-guess
+   or "correct" it using outside assumptions.
+4. Never infer that a task was completed unless a task_activity entry's status_end is
+   "completed" (or an event of type "completed" is present) -- recorded time, high progress, or
+   reaching the planned duration are NOT completion.
+5. Preserve parent/subtask relationships (see the subtask rule above).
+6. Only summarize information present in the supplied snapshot -- if something is not there,
+   omit it rather than guessing or padding.
+7. Use neutral, factual language. No productivity judgments of any kind -- do not say someone
+   was "productive", "behind", "did well", "should have done more", or compare members against
+   each other. Report what was recorded, nothing more:
+     - Write: "Ali recorded 2h of focused work on Complete Module 2."
+     - Never: "Ali only worked 2h." / "Abrar was the most productive today."
+8. No motivational filler, no exclamation marks, no emoji.
+9. Every `user_id` you use in `members[]` MUST be exactly one of the member ids listed in the
+   snapshot's `members[]`. Do not invent member ids or add an entry for someone not present.
+10. Every number, time, or percentage you state must be exactly derivable from the snapshot
+    (already-provided totals, counts, or progress_start/progress_end values) -- never calculate,
+    round differently, or estimate a new figure.
 """
 
 _NUMBER_RE = re.compile(r"\d[\d,.]*%?")
@@ -77,41 +128,81 @@ def _format_hm(seconds: int) -> str:
     return f"{hours}h {minutes}m"
 
 
+def _fallback_workspace_changes_summary(snapshot: StructuredSnapshot) -> str:
+    changes = snapshot.workspace_changes
+    if not changes.has_any:
+        return ""
+    bits: List[str] = []
+    if changes.invitations:
+        bits.append(f"{len(changes.invitations)} invitation(s) sent or updated")
+    if changes.members_joined:
+        bits.append(f"{len(changes.members_joined)} member(s) joined")
+    if changes.members_removed:
+        bits.append(f"{len(changes.members_removed)} member(s) left")
+    if changes.tasks_created:
+        bits.append(f"{changes.tasks_created} task(s) created")
+    if changes.tasks_completed:
+        bits.append(f"{changes.tasks_completed} task(s) completed")
+    if changes.tasks_skipped:
+        bits.append(f"{changes.tasks_skipped} task(s) skipped")
+    if changes.tasks_deleted:
+        bits.append(f"{changes.tasks_deleted} task(s) deleted")
+    return (", ".join(bits) + ".") if bits else ""
+
+
 def _fallback_narrative(snapshot: StructuredSnapshot) -> SummaryNarrative:
     """
     Deterministic, non-AI narrative built directly from the snapshot. Used both for the
-    "no activity" short-circuit (10.3) and as a last-resort fallback when the AI keeps
+    "no activity" short-circuit and as a last-resort fallback when the AI keeps
     failing validation -- the feature must never surface a fabricated or broken summary.
     """
     if not snapshot.has_activity:
         return SummaryNarrative(
-            overall_summary=f"No focused work was recorded on {snapshot.summary_date.isoformat()}.",
-            member_notes=[],
+            overall_summary=f"No workspace activity was recorded on {snapshot.summary_date.isoformat()}.",
+            members=[],
+            workspace_changes_summary="",
             highlights=[],
         )
 
-    active_members: List[MemberEntry] = [m for m in snapshot.members if m.focused_seconds > 0]
-    overall = (
-        f"{len(active_members)} member{'s' if len(active_members) != 1 else ''} logged "
-        f"{_format_hm(snapshot.total_focused_seconds)} of focused work on "
-        f"{snapshot.summary_date.isoformat()}."
-    )
-
-    notes: List[MemberNote] = []
-    for member in active_members:
-        completed = sum(1 for t in member.tasks if t.status == "completed")
-        notes.append(
-            MemberNote(
-                user_id=member.user_id,
-                note=(
-                    f"{member.display_name} focused {_format_hm(member.focused_seconds)} "
-                    f"across {len(member.tasks)} task{'s' if len(member.tasks) != 1 else ''}, "
-                    f"{completed} completed."
-                ),
-            )
+    active_members: List[MemberEntry] = [
+        m for m in snapshot.members if m.focused_seconds > 0 or m.events or m.task_activity
+    ]
+    if snapshot.total_focused_seconds > 0:
+        overall = (
+            f"{len(active_members)} member{'s' if len(active_members) != 1 else ''} were active, "
+            f"logging {_format_hm(snapshot.total_focused_seconds)} of focused work on "
+            f"{snapshot.summary_date.isoformat()}."
+        )
+    else:
+        overall = (
+            f"{len(active_members)} member{'s' if len(active_members) != 1 else ''} had recorded "
+            f"activity on {snapshot.summary_date.isoformat()}, with no focused time logged."
         )
 
-    return SummaryNarrative(overall_summary=overall, member_notes=notes, highlights=[])
+    notes: List[MemberNarrative] = []
+    for member in active_members:
+        if member.task_activity:
+            completed = sum(1 for t in member.task_activity if t.status_end == TaskStatus.completed)
+            note = (
+                f"{member.display_name} focused {_format_hm(member.focused_seconds)} across "
+                f"{len(member.task_activity)} task{'s' if len(member.task_activity) != 1 else ''}, "
+                f"{completed} completed."
+            )
+        elif member.events:
+            note = (
+                f"{member.display_name} recorded {len(member.events)} "
+                f"activity item{'s' if len(member.events) != 1 else ''}, no focused time logged."
+            )
+        else:
+            note = f"{member.display_name} had no recorded task activity."
+        notes.append(MemberNarrative(user_id=member.user_id, note=note))
+
+    return SummaryNarrative(
+        overall_summary=overall,
+        members=notes,
+        workspace_changes_summary=_fallback_workspace_changes_summary(snapshot),
+        highlights=[],
+    )
 
 
 def _expected_numeric_tokens(snapshot: StructuredSnapshot) -> Set[str]:
@@ -129,13 +220,33 @@ def _expected_numeric_tokens(snapshot: StructuredSnapshot) -> Set[str]:
     )
 
     for member in snapshot.members:
-        tokens.update({str(member.focused_seconds), str(len(member.tasks))})
+        tokens.update({str(member.focused_seconds), str(len(member.task_activity)), str(len(member.events))})
         hours, rem = divmod(member.focused_seconds, 3600)
         tokens.update({str(hours), str(rem // 60)})
-        completed = sum(1 for t in member.tasks if t.status == "completed")
-        in_progress = sum(1 for t in member.tasks if t.status == "in_progress")
-        skipped = sum(1 for t in member.tasks if t.status == "skipped")
+        completed = sum(1 for t in member.task_activity if t.status_end == TaskStatus.completed)
+        in_progress = sum(1 for t in member.task_activity if t.status_end == TaskStatus.in_progress)
+        skipped = sum(1 for t in member.task_activity if t.status_end == TaskStatus.skipped)
         tokens.update({str(completed), str(in_progress), str(skipped)})
+        for t in member.task_activity:
+            t_hours, t_rem = divmod(t.focused_seconds, 3600)
+            tokens.update({str(t.focused_seconds), str(t_hours), str(t_rem // 60)})
+            if t.progress_start is not None:
+                tokens.add(str(t.progress_start))
+            if t.progress_end is not None:
+                tokens.add(str(t.progress_end))
+
+    changes = snapshot.workspace_changes
+    tokens.update(
+        {
+            str(len(changes.invitations)),
+            str(len(changes.members_joined)),
+            str(len(changes.members_removed)),
+            str(changes.tasks_created),
+            str(changes.tasks_completed),
+            str(changes.tasks_skipped),
+            str(changes.tasks_deleted),
+        }
+    )
 
     return tokens
 
@@ -145,13 +256,18 @@ def _validate_narrative(narrative: SummaryNarrative, snapshot: StructuredSnapsho
     warnings: List[str] = []
 
     known_ids = snapshot.known_member_ids
-    for note in narrative.member_notes:
+    for note in narrative.members:
         if note.user_id not in known_ids:
-            warnings.append(f"member_notes references unknown member_id '{note.user_id}'")
+            warnings.append(f"members references unknown member_id '{note.user_id}'")
 
     expected_numbers = _expected_numeric_tokens(snapshot)
     text_blob = " ".join(
-        [narrative.overall_summary, *(n.note for n in narrative.member_notes), *narrative.highlights]
+        [
+            narrative.overall_summary,
+            narrative.workspace_changes_summary,
+            *(n.note for n in narrative.members),
+            *narrative.highlights,
+        ]
     )
     for raw in _NUMBER_RE.findall(text_blob):
         cleaned = raw.rstrip("%").replace(",", "")
