@@ -202,6 +202,43 @@ uv run pytest --cov=src.app tests/
 
 ---
 
+## ☁️ Deploying to Vercel
+
+`api/index.py` re-exports the FastAPI `app` from `src/app/main.py`, and
+`vercel.json` points Vercel's Python runtime (`@vercel/python`) at it — so
+`vercel --prod` (or a Vercel Git integration) deploys this service as-is,
+no separate build step needed.
+
+Steps:
+1. Import this repo as its own Vercel project (separate from the Next.js
+   app's project — they deploy independently).
+2. Set every variable from `.env.example` in that Vercel project's
+   Environment Variables settings — `.env` itself is never read in
+   production, only local dev.
+3. Set `ALLOWED_ORIGINS` to your deployed Next.js app's real origin(s) (e.g.
+   `https://ontask-by-abrar.vercel.app`), not just `localhost`.
+4. Point the Next.js app's own `ONTASK_LLM_SERVICE_URL` (in *its* Vercel
+   project's env vars) at this service's deployed URL.
+
+Two things worth knowing about running this specific service on Vercel's
+serverless runtime, rather than as a long-lived process:
+
+- **Provider cooldown tracking resets on every cold start.** `LLMGateway`
+  tracks rate-limit cooldowns and disabled deployments as in-memory state on
+  its singleton instance (see `gateway.py`) — that state doesn't survive
+  between separate serverless invocations the way it would on a persistent
+  server. Failover still works correctly within a single warm invocation;
+  it just won't "remember" a cooldown across cold starts. Not a correctness
+  issue, just reduced effectiveness of that specific optimization.
+- **Function timeouts.** Each fallback attempt in `_run_with_fallback` has
+  its own 30s per-provider timeout, and `GATEWAY_MAX_ATTEMPTS` defaults to
+  10 — a worst-case chain of failures could exceed Vercel's default function
+  timeout (10s on Hobby, higher on Pro/Enterprise). Consider lowering
+  `GATEWAY_MAX_ATTEMPTS` (e.g. 3-4) via that Vercel project's env vars if
+  you're on a plan with a short timeout ceiling.
+
+---
+
 ## 🔐 Security Considerations
 
 - API keys stored in `.env` (never committed).
