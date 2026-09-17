@@ -1,0 +1,36 @@
+[project]
+name = "ontask-llm"
+version = "1.0.0"
+description = "OnTask's AI microservice: narrates structured workspace daily-activity snapshots via a multi-provider LLM Gateway with automatic failover (Phase 10 -- Shared 'Yesterday's Work' Summary)."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.32.0",
+    "pydantic>=2.9.0",
+    "pydantic-settings>=2.6.0",
+    "openai>=1.50.0",
+    "python-dotenv>=1.0.1",
+    "langchain-openai>=1.6.2",
+    "langchain-core>=1.6.2",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.24.0",
+    "httpx>=0.27.0",
+]
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+# Only "." on the path -- every import in this codebase is "src.app...".
+# Adding "src" too would let "app.foo" resolve as a SECOND, separately-cached
+# copy of the same module, so a test patching "app.foo.Bar" would silently
+# miss the "src.app.foo.Bar" the application code actually runs.
+pythonpath = ["."]
