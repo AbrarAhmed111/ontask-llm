@@ -96,6 +96,16 @@ What to cover, per member (in `members[].note`):
 - When a member's `events` show a clear order (e.g. created, then started, then assigned), prefer
   a natural chronological sentence ("created X, worked on it, then assigned it to Y") over an
   unordered list of facts.
+- Task blockers (`blockers`): each entry is a task that someone reported could not move forward.
+  Describe them factually and only from the entry: the task by its EXACT title in double quotes;
+  who reported it (`blocked_by_name`); who was asked to help (the names in `mentioned`); and, only
+  if `resolved_at` is set, who resolved it (`resolved_by_name`). When `still_blocked_at_report_end`
+  is true the task remained blocked at the end of the reporting period. You may quote the `reason`
+  or `resolution_note` -- but only EXACTLY as given, inside double quotes; if you are not quoting
+  it, describe the situation generally ("was blocked waiting on a teammate") or leave the reason
+  out. Never paraphrase a reason into new specifics, never state how long a task was blocked, and
+  never say a blocker was resolved (or by whom) unless the entry says so. A blocked task is
+  "blocked" -- not paused, skipped, or abandoned.
 - A subtask (an event or task_activity entry with a non-null `parent_title`) should always be
   described with its parent, e.g. worked on "Authentication" under "School Management MVP" --
   never just the subtask name alone.
@@ -140,9 +150,12 @@ Hard rules (violating any of these makes the narrative unusable):
 10. Never write a number, digit, or percentage anywhere in your output except a calendar
     day/month/year, as described above. If you find yourself about to write a duration, a count,
     or a percentage -- stop, and describe it in words instead, or omit it.
-11. Every double-quoted string you write MUST be an exact task title, goal name, or invited
-    email address copied verbatim from the snapshot. Never invent or paraphrase a quoted title,
-    goal name, or email.
+11. Every double-quoted string you write MUST be an exact task title, goal name, invited
+    email address, blocker reason, or blocker resolution note copied verbatim from the snapshot.
+    Never invent or paraphrase a quoted title, goal name, email, reason, or note.
+12. Only name people who appear in the snapshot (a member's display_name, a blocker's
+    `blocked_by_name`, `mentioned[].display_name`, or `resolved_by_name`). Never invent a blocker,
+    a reason, or a resolution.
 """
 
 _EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
@@ -188,9 +201,11 @@ def _format_hm(seconds: int) -> str:
 
 def _fallback_workspace_changes_summary(snapshot: StructuredSnapshot) -> str:
     changes = snapshot.workspace_changes
-    if not changes.has_any:
+    if not changes.has_any and not snapshot.blockers:
         return ""
     bits: List[str] = []
+    if snapshot.blockers:
+        bits.append(f"{len(snapshot.blockers)} task blocker(s) recorded")
     if changes.invitations:
         bits.append(f"{len(changes.invitations)} invitation(s) sent or updated")
     if changes.members_joined:
@@ -274,10 +289,18 @@ def _allowed_calendar_tokens(snapshot: StructuredSnapshot) -> Set[str]:
     return tokens
 
 
+def _normalize_quoted(value: str) -> str:
+    """How a quoted string and a known one are compared: case-insensitive, ignoring surrounding
+    whitespace and trailing sentence punctuation. Applied to BOTH sides -- a blocker reason such
+    as "Waiting for API credentials." ends in a full stop that a model quoting it inside a
+    sentence may or may not carry over, and must match either way."""
+    return value.strip().rstrip(".,!?;:").lower()
+
+
 def _known_quotable_strings(snapshot: StructuredSnapshot) -> Set[str]:
-    """Every exact task title, parent title, goal name, and invited email address the AI is
-    allowed to put in double quotes (see SYSTEM_PROMPT rule 11) -- anything else quoted is a
-    fabrication."""
+    """Every exact task title, parent title, goal name, invited email address, blocker reason,
+    and blocker resolution note the AI is allowed to put in double quotes (see SYSTEM_PROMPT
+    rule 11) -- anything else quoted is a fabrication."""
     values: Set[str] = set()
     for member in snapshot.members:
         for t in member.task_activity:
@@ -293,7 +316,16 @@ def _known_quotable_strings(snapshot: StructuredSnapshot) -> Set[str]:
                 values.add(e.parent_title)
     for inv in snapshot.workspace_changes.invitations:
         values.add(inv.invited_email)
-    return {v.strip().lower() for v in values if v.strip()}
+    for blocker in snapshot.blockers:
+        values.add(blocker.task_title)
+        values.add(blocker.reason)
+        if blocker.parent_title:
+            values.add(blocker.parent_title)
+        if blocker.goal_name:
+            values.add(blocker.goal_name)
+        if blocker.resolution_note:
+            values.add(blocker.resolution_note)
+    return {_normalize_quoted(v) for v in values if v.strip()}
 
 
 _QUOTED_RE = re.compile(r'["“]([^"”\n]{2,160})["”]')
@@ -383,7 +415,7 @@ def _validate_narrative(narrative: SummaryNarrative, snapshot: StructuredSnapsho
 
     known_quotable = _known_quotable_strings(snapshot)
     for quoted in _QUOTED_RE.findall(text_blob):
-        normalized = quoted.strip().rstrip(".,!?;:").lower()
+        normalized = _normalize_quoted(quoted)
         if normalized and normalized not in known_quotable:
             warnings.append(
                 f"quoted text \"{quoted}\" does not match any task title, parent title, or "

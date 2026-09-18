@@ -129,6 +129,46 @@ class WorkspaceChanges(BaseModel):
         )
 
 
+class BlockerMemberEntry(BaseModel):
+    user_id: str
+    display_name: str
+
+
+class BlockerEntry(BaseModel):
+    """
+    One task blocker that overlapped the reporting window -- someone reported that a task could not
+    move forward, optionally asking named members to help. Computed by the SQL aggregator straight
+    from the blocker tables (supabase/migrations/0041_task_blockers.sql); every field, `reason` and
+    `resolution_note` included, is the workspace members' own recorded words and facts, never
+    reinterpreted here.
+
+    `resolved_*` are only set when the blocker was resolved INSIDE the window. One resolved later is
+    reported as `still_blocked_at_report_end`, so a report regenerated after the fact can't leak a
+    future resolution into the window it covers. `blocked_seconds` is time blocked within the window
+    only -- like every other duration, the application renders it and the narrative never states it.
+    """
+
+    blocker_id: str
+    task_id: str
+    task_title: str
+    parent_title: Optional[str] = Field(
+        default=None, description="Set when task_title is a subtask; None for a standalone/parent task"
+    )
+    goal_id: Optional[str] = None
+    goal_name: Optional[str] = None
+    reason: str
+    blocked_by_user_id: str
+    blocked_by_name: str
+    blocked_at: datetime
+    mentioned: List[BlockerMemberEntry] = Field(default_factory=list)
+    resolved_at: Optional[datetime] = None
+    resolved_by_user_id: Optional[str] = None
+    resolved_by_name: Optional[str] = None
+    resolution_note: Optional[str] = None
+    still_blocked_at_report_end: bool = False
+    blocked_seconds: int = Field(default=0, ge=0)
+
+
 class StructuredSnapshot(BaseModel):
     """
     The full ground-truth dataset for one `(workspace_id, report_end)` pair --
@@ -150,6 +190,8 @@ class StructuredSnapshot(BaseModel):
     total_focused_seconds: int = Field(ge=0)
     members: List[MemberEntry] = Field(default_factory=list)
     workspace_changes: WorkspaceChanges = Field(default_factory=WorkspaceChanges)
+    # Absent (so empty) in snapshots produced before task blockers existed.
+    blockers: List[BlockerEntry] = Field(default_factory=list)
 
     @property
     def has_activity(self) -> bool:
@@ -160,6 +202,7 @@ class StructuredSnapshot(BaseModel):
             self.total_focused_seconds > 0
             or any(m.events or m.task_activity for m in self.members)
             or self.workspace_changes.has_any
+            or bool(self.blockers)
         )
 
     @property
@@ -172,6 +215,7 @@ class StructuredSnapshot(BaseModel):
         for m in self.members:
             ids.update(t.task_id for t in m.task_activity)
             ids.update(e.task_id for e in m.events if e.task_id)
+        ids.update(b.task_id for b in self.blockers)
         return ids
 
 
