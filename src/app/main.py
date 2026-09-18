@@ -19,9 +19,9 @@ app = FastAPI(
     version="1.0.0",
     description=(
         "OnTask's AI microservice: turns an already-computed structured snapshot of a "
-        "workspace's daily focus-time activity into a validated, grounded narrative "
-        "(Phase 10 -- Shared 'Yesterday's Work' Summary), using a multi-provider LLM "
-        "Gateway with automatic failover."
+        "workspace's rolling-24h focus-time activity into a validated, grounded narrative "
+        "(the automatic Daily Report), using a multi-provider LLM Gateway with automatic "
+        "failover."
     ),
 )
 

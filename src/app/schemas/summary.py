@@ -1,22 +1,25 @@
 """
-Pydantic Schemas for the Shared AI "Yesterday's Work" Summary feature (Phase 10).
+Pydantic Schemas for the automatic Daily Report feature (Phase 11 -- replaces
+Phase 10's on-demand "Yesterday's Work" summary).
 
 `StructuredSnapshot` is the contract with the caller (the OnTask Next.js backend):
-it is the already-computed, ground-truth dataset for one workspace-day, aggregated
-from `task_events` / `task_time_entries` / `workspace_invitations` /
-`workspace_members` there (see supabase/migrations/0016_phase10_richer_ai_activity_snapshot.sql).
-This service never touches a database and never invents facts -- it only narrates
-the snapshot it is handed (per project_document/update-ai.md's "Source of Truth
-Rules").
+it is the already-computed, ground-truth dataset for one workspace's rolling
+24-hour reporting window (report_start -> report_end, NOT a calendar day),
+aggregated from `task_events` / `task_time_entries` / `workspace_invitations` /
+`workspace_members` there (see
+supabase/migrations/0018_automatic_daily_reports.sql). This service never
+touches a database and never invents facts -- it only narrates the snapshot
+it is handed (per project_document/update-ai.md's "Source of Truth Rules").
 
-This is intentionally more than a time/status report: `members[].events` is the
-day's actual activity log (created/assigned/started/completed/...), and
-`workspace_changes` covers invitations and membership changes. The frontend
-renders that structured data directly (task titles, bullet lists, hierarchy) --
-the model's only job is the prose layered on top (`SummaryNarrative`).
+This is intentionally more than a time/status report: `members[].events` is
+the window's actual activity log (created/assigned/started/completed/...),
+and `workspace_changes` covers invitations and membership changes. The
+frontend renders that structured data directly (task titles, bullet lists,
+hierarchy) -- the model's only job is the prose layered on top
+(`SummaryNarrative`).
 """
 
-from datetime import date, datetime
+from datetime import datetime
 from enum import Enum
 from typing import Any, Dict, List, Optional, Set
 
@@ -33,7 +36,7 @@ class TaskStatus(str, Enum):
 
 class MemberEventEntry(BaseModel):
     """
-    One raw, factual thing a member did that day (task_events row, or a
+    One raw, factual thing a member did within the reporting window (task_events row, or a
     synthesized 'invitation_sent' entry under the inviter -- see the SQL
     aggregator). `type` is one of task_events.event_type's values, or
     'invitation_sent'. `metadata` carries whatever extra fields that type
@@ -53,7 +56,7 @@ class MemberEventEntry(BaseModel):
 
 
 class TaskActivityEntry(BaseModel):
-    """A single task (or subtask) a member worked on, within one day's snapshot."""
+    """A single task (or subtask) a member worked on, within one reporting window's snapshot."""
 
     task_id: str
     title: str
@@ -63,14 +66,14 @@ class TaskActivityEntry(BaseModel):
     )
     focused_seconds: int = Field(ge=0)
     progress_start: Optional[int] = Field(
-        default=None, ge=0, le=100, description="Only set if a progress_changed event occurred this day"
+        default=None, ge=0, le=100, description="Only set if a progress_changed event occurred within the reporting window"
     )
     progress_end: Optional[int] = Field(default=None, ge=0, le=100)
     status_end: TaskStatus
 
 
 class MemberEntry(BaseModel):
-    """One workspace member's activity for the day."""
+    """One workspace member's activity within the reporting window."""
 
     user_id: str
     display_name: str
@@ -80,7 +83,7 @@ class MemberEntry(BaseModel):
 
 
 class InvitationActivityEntry(BaseModel):
-    """An invitation sent and/or responded to on the summary date.
+    """An invitation sent and/or responded to within the reporting window.
     `rejection_reason` is deliberately never included: OnTask restricts it to
     the workspace owner's view, but this summary is visible to every member."""
 
@@ -97,7 +100,7 @@ class MemberChangeEntry(BaseModel):
 
 
 class WorkspaceChanges(BaseModel):
-    """Workspace-level (not task-level) activity for the day."""
+    """Workspace-level (not task-level) activity within the reporting window."""
 
     invitations: List[InvitationActivityEntry] = Field(default_factory=list)
     members_joined: List[MemberChangeEntry] = Field(default_factory=list)
@@ -122,14 +125,21 @@ class WorkspaceChanges(BaseModel):
 
 class StructuredSnapshot(BaseModel):
     """
-    The full ground-truth dataset for one `(workspace_id, summary_date)` pair --
+    The full ground-truth dataset for one `(workspace_id, report_end)` pair --
     this is what `workspace_daily_summaries.structured_snapshot` stores per 10.2.4.
     Every fact shown to the user must be traceable to this object.
+
+    `report_start`/`report_end` are the exact rolling-24h window boundaries
+    (report_start == report_end - 24h) -- NOT a calendar day. The caller
+    (OnTask's Next.js backend) has already resolved these to absolute instants
+    before calling this service; this service never computes or reinterprets
+    them, it only narrates what happened inside that window.
     """
 
     workspace_id: str
     workspace_name: str
-    summary_date: date
+    report_start: datetime
+    report_end: datetime
     timezone: str
     total_focused_seconds: int = Field(ge=0)
     members: List[MemberEntry] = Field(default_factory=list)
@@ -138,8 +148,8 @@ class StructuredSnapshot(BaseModel):
     @property
     def has_activity(self) -> bool:
         """True if there is ANYTHING worth narrating -- not just recorded time.
-        A day with only a sent invitation (no timer use at all) still deserves a
-        real summary, not the "no work recorded" short-circuit."""
+        A window with only a sent invitation (no timer use at all) still deserves a
+        real report, not the "no activity recorded" short-circuit."""
         return (
             self.total_focused_seconds > 0
             or any(m.events or m.task_activity for m in self.members)
@@ -173,7 +183,7 @@ class MemberNarrative(BaseModel):
     note: str = Field(
         ...,
         description=(
-            "A few sentences narrating this member's day: what they created, worked on, "
+            "A few sentences narrating this member's activity during the reporting window: what they created, worked on, "
             "completed, were assigned, assigned to others, and any invitations they sent -- "
             "in a sensible chronological order when the sequence matters. Neutral, factual tone."
         ),
@@ -195,13 +205,15 @@ class SummaryNarrative(BaseModel):
     possibly miscounting) them.
     """
 
-    overall_summary: str = Field(..., description="2-4 sentence neutral overview of the workspace's day")
+    overall_summary: str = Field(
+        ..., description="2-4 sentence neutral overview of the workspace's activity during the reporting window"
+    )
     members: List[MemberNarrative] = Field(default_factory=list)
     workspace_changes_summary: str = Field(
         default="",
         description=(
             "1-2 neutral sentences on workspace-level changes (invitations sent/answered, members "
-            "joining/leaving) if any occurred that day; empty string if workspace_changes was empty"
+            "joining/leaving) if any occurred within the reporting window; empty string if workspace_changes was empty"
         ),
     )
     highlights: List[str] = Field(

@@ -1,5 +1,6 @@
 """
-AI Daily Summary Service (Phase 10 -- Shared "Yesterday's Work" Summary).
+AI Daily Report Service (Phase 11 -- automatic rolling-24h Daily Report,
+formerly Phase 10's on-demand "Yesterday's Work" summary).
 
 Structured-first, AI-narrates-only (see project_document/update-ai.md's "Source
 of Truth Rules" and 10.2/10.4 of project_document/ontask-evolution-plan.md):
@@ -57,10 +58,12 @@ gateway = LLMGateway(
 SYSTEM_PROMPT = """You are a neutral reporting assistant for OnTask, a team focus-time tracker.
 
 You will be given a STRUCTURED JSON snapshot of everything that happened in a workspace during \
-one day: what each member created, worked on, was assigned, completed, skipped, and any \
-invitations sent or membership changes. Your job is to turn this into a factual daily work \
-narrative -- "here's what happened in our workspace yesterday" -- NOT a time report and NOT a \
-productivity evaluation.
+its reporting window (report_start to report_end, a rolling 24-hour period, not necessarily a \
+calendar day): what each member created, worked on, was assigned, completed, skipped, and any \
+invitations sent or membership changes. Your job is to turn this into a factual work narrative \
+-- "here's what happened in our workspace during the previous 24 hours" -- NOT a time report and \
+NOT a productivity evaluation. Never call this window "yesterday" or "today" -- refer to it as \
+"the reporting period" or "the previous 24 hours", since it does not align to calendar days.
 
 What to cover, per member (in `members[].note`):
 - What they created, worked on, completed, or skipped -- named by title.
@@ -91,8 +94,8 @@ Hard rules (violating any of these makes the narrative unusable):
    the snapshot.
 3. Never attribute work to anyone other than the member whose `events`/`task_activity` it appears
    under -- the snapshot already resolved historical attribution correctly (it reflects who
-   actually did the work that day, not who a task is currently assigned to); do not second-guess
-   or "correct" it using outside assumptions.
+   actually did the work during the reporting window, not who a task is currently assigned to);
+   do not second-guess or "correct" it using outside assumptions.
 4. Never infer that a task was completed unless a task_activity entry's status_end is
    "completed" (or an event of type "completed" is present) -- recorded time, high progress, or
    reaching the planned duration are NOT completion.
@@ -103,7 +106,7 @@ Hard rules (violating any of these makes the narrative unusable):
    was "productive", "behind", "did well", "should have done more", or compare members against
    each other. Report what was recorded, nothing more:
      - Write: "Ali recorded 2h of focused work on Complete Module 2."
-     - Never: "Ali only worked 2h." / "Abrar was the most productive today."
+     - Never: "Ali only worked 2h." / "Abrar was the most productive this period."
 8. No motivational filler, no exclamation marks, no emoji.
 9. Every `user_id` you use in `members[]` MUST be exactly one of the member ids listed in the
    snapshot's `members[]`. Do not invent member ids or add an entry for someone not present.
@@ -158,7 +161,7 @@ def _fallback_narrative(snapshot: StructuredSnapshot) -> SummaryNarrative:
     """
     if not snapshot.has_activity:
         return SummaryNarrative(
-            overall_summary=f"No workspace activity was recorded on {snapshot.summary_date.isoformat()}.",
+            overall_summary="No significant workspace activity was recorded during the previous 24 hours.",
             members=[],
             workspace_changes_summary="",
             highlights=[],
@@ -170,13 +173,13 @@ def _fallback_narrative(snapshot: StructuredSnapshot) -> SummaryNarrative:
     if snapshot.total_focused_seconds > 0:
         overall = (
             f"{len(active_members)} member{'s' if len(active_members) != 1 else ''} were active, "
-            f"logging {_format_hm(snapshot.total_focused_seconds)} of focused work on "
-            f"{snapshot.summary_date.isoformat()}."
+            f"logging {_format_hm(snapshot.total_focused_seconds)} of focused work during the "
+            f"previous 24 hours."
         )
     else:
         overall = (
             f"{len(active_members)} member{'s' if len(active_members) != 1 else ''} had recorded "
-            f"activity on {snapshot.summary_date.isoformat()}, with no focused time logged."
+            f"activity during the previous 24 hours, with no focused time logged."
         )
 
     notes: List[MemberNarrative] = []
@@ -213,11 +216,11 @@ def _expected_numeric_tokens(snapshot: StructuredSnapshot) -> Set[str]:
     total_hours, total_rem = divmod(snapshot.total_focused_seconds, 3600)
     tokens.update({str(total_hours), str(total_rem // 60)})
 
-    # The date itself is legitimately restated in prose (e.g. "on the 16th"),
-    # not a fabricated figure -- allow its day/month/year components too.
-    tokens.update(
-        {str(snapshot.summary_date.day), str(snapshot.summary_date.month), str(snapshot.summary_date.year)}
-    )
+    # The window's boundary dates are legitimately restated in prose (e.g. "on the 17th" or
+    # "into the 18th"), not a fabricated figure -- allow both report_start's and report_end's
+    # day/month/year components (a rolling 24h window can span two calendar dates).
+    for boundary in (snapshot.report_start, snapshot.report_end):
+        tokens.update({str(boundary.day), str(boundary.month), str(boundary.year)})
 
     for member in snapshot.members:
         tokens.update({str(member.focused_seconds), str(len(member.task_activity)), str(len(member.events))})
@@ -282,7 +285,7 @@ def _validate_narrative(narrative: SummaryNarrative, snapshot: StructuredSnapsho
 
 
 class SummaryService:
-    """Orchestrates structured-snapshot -> validated AI narrative for Phase 10."""
+    """Orchestrates structured-snapshot -> validated AI narrative for the Daily Report."""
 
     def __init__(self, gateway_instance: LLMGateway = gateway):
         self.gateway = gateway_instance
@@ -290,8 +293,8 @@ class SummaryService:
     async def generate_summary(self, snapshot: StructuredSnapshot) -> SummaryGenerateResponse:
         if not snapshot.has_activity:
             logger.info(
-                f"📭 No activity for workspace={snapshot.workspace_id} date={snapshot.summary_date}; "
-                f"skipping AI call."
+                f"📭 No activity for workspace={snapshot.workspace_id} "
+                f"window={snapshot.report_start}..{snapshot.report_end}; skipping AI call."
             )
             return SummaryGenerateResponse(
                 snapshot=snapshot,
@@ -364,7 +367,7 @@ class SummaryService:
 
         logger.error(
             f"❌ Falling back to the deterministic template for workspace={snapshot.workspace_id} "
-            f"date={snapshot.summary_date} after {attempts_made} attempt(s)."
+            f"window={snapshot.report_start}..{snapshot.report_end} after {attempts_made} attempt(s)."
         )
         return SummaryGenerateResponse(
             snapshot=snapshot,

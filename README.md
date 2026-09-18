@@ -22,11 +22,13 @@ Built by **[Abrar Ahmed](https://www.abrarahmed.pro)** | Managed with [uv](https
 
 ---
 
-This service exists for exactly one feature in [OnTask](https://www.abrarahmed.pro): **Phase 10
-— the Shared "Yesterday's Work" Summary**. A workspace's day of focus-time tracking is already
-fully computed elsewhere (in the Next.js app, from `task_time_entries`) before it ever reaches
-this service — this service's only job is to turn that structured dataset into a few sentences
-of neutral, factual prose.
+This service exists for exactly one feature in [OnTask](https://www.abrarahmed.pro): the
+**automatic Daily Report** — a rolling 24-hour reporting window, generated server-side every
+day at a workspace-configured time (12:00 PM by default) in each workspace's own timezone
+(formerly an on-demand, calendar-day "Yesterday's Work" summary). A workspace's reporting-window
+activity is already fully computed elsewhere (in the Next.js app, from `task_time_entries`)
+before it ever reaches this service — this service's only job is to turn that structured dataset
+into a few sentences of neutral, factual prose.
 
 ## 🧭 Design principle: structured-first, AI-narrates-only
 
@@ -37,11 +39,11 @@ figure triggers a corrective retry — and, failing that, a deterministic, non-A
 narrative, so this endpoint can never hand back a fabricated report.
 
 ```
-Caller (Next.js) aggregates task_time_entries for one workspace + day
+Caller (Next.js) aggregates task_time_entries for one workspace's rolling 24h reporting window
     ↓
 POST /api/summary/generate  { snapshot: StructuredSnapshot }
     ↓
-No activity that day? → deterministic sentence, LLM never called
+No activity in the window? → deterministic sentence, LLM never called
     ↓ has activity
 System prompt (hard rules) + snapshot JSON → LLMGateway.generate_structured(SummaryNarrative)
     ↓
@@ -161,7 +163,8 @@ curl -X POST http://localhost:8000/api/summary/generate \
     "snapshot": {
       "workspace_id": "ws_123",
       "workspace_name": "Design Team",
-      "summary_date": "2026-09-16",
+      "report_start": "2026-09-16T12:00:00+05:00",
+      "report_end": "2026-09-17T12:00:00+05:00",
       "timezone": "Asia/Karachi",
       "total_focused_seconds": 7200,
       "members": [
@@ -169,23 +172,25 @@ curl -X POST http://localhost:8000/api/summary/generate \
           "user_id": "user_1",
           "display_name": "Amina",
           "focused_seconds": 7200,
-          "tasks": [
-            {"task_id": "t1", "name": "Redesign homepage", "status": "completed", "focused_seconds": 5400},
-            {"task_id": "t2", "name": "Review PRs", "status": "in_progress", "focused_seconds": 1800}
+          "events": [],
+          "task_activity": [
+            {"task_id": "t1", "title": "Redesign homepage", "status_end": "completed", "focused_seconds": 5400},
+            {"task_id": "t2", "title": "Review PRs", "status_end": "in_progress", "focused_seconds": 1800}
           ]
         }
-      ]
+      ],
+      "workspace_changes": {}
     }
   }'
 ```
 
 Response: the input `snapshot` echoed back, a `narrative` (`overall_summary`, per-member
-`member_notes`, `highlights`), and `meta` (`provider`, `model`, `usage`, `status_events`,
-whether the deterministic `used_fallback_template` was needed, and any
+`members[].note`, `workspace_changes_summary`, `highlights`), and `meta` (`provider`, `model`,
+`usage`, `status_events`, whether the deterministic `used_fallback_template` was needed, and any
 `validation_warnings`). This service is **stateless** — it never touches a database.
-Idempotency, the `(workspace_id, summary_date)` uniqueness constraint, regeneration
-versioning, and RLS all live in the OnTask Next.js app that calls this endpoint (see
-`project_document/ontask-evolution-plan.md`, Phase 10, in the main OnTask repo).
+Idempotency (the `(workspace_id, report_end)` uniqueness constraint), the automatic scheduler,
+regeneration versioning, and RLS all live in the OnTask Next.js app + Supabase project that call
+this endpoint (see `supabase/migrations/0018_automatic_daily_reports.sql` in the main OnTask repo).
 
 ### `GET /health`
 Reports overall status and every configured provider deployment's availability/cooldown state.
