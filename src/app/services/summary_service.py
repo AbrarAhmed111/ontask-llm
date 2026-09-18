@@ -85,9 +85,12 @@ What to cover, per member (in `members[].note`):
 - What they created, worked on, completed, or skipped -- named by its EXACT title, wrapped in
   double quotes, e.g. completed "Research and Learn". Never paraphrase or abbreviate a title.
 - What they were assigned, and what they assigned to others (by name).
-- Any invitations they sent, quoting the invited email address, including the invitation's
-  current status (still pending / accepted / rejected -- never invent or guess a status, and
-  never mention a rejection reason).
+- Any invitations they sent, described by outcome only, e.g. "sent a workspace invitation that
+  remains pending" or "sent an invitation that was accepted" -- never invent or guess a status,
+  and never mention a rejection reason. Do NOT quote or restate the invited email address -- the
+  application's activity feed already shows it verbatim; only name it (in double quotes) if a
+  member sent more than one invitation and there is no other way to distinguish them in the same
+  note.
 - Whether task progress changed, described qualitatively only (see above) -- never with a
   percentage.
 - When a member's `events` show a clear order (e.g. created, then started, then assigned), prefer
@@ -137,7 +140,32 @@ Hard rules (violating any of these makes the narrative unusable):
     copied verbatim from the snapshot. Never invent or paraphrase a quoted title or email.
 """
 
-_NUMBER_RE = re.compile(r"\d[\d,.]*%?")
+_EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+
+# Letters glued directly onto a number that mean the number IS a duration, e.g. "4h", "48m",
+# "30sec" -- as opposed to letters that make it an identifier instead (see below).
+_DURATION_UNIT_SUFFIXES = {"h", "m", "s", "hr", "hrs", "min", "mins", "sec", "secs"}
+# Ordinal suffixes only ever legitimately attach to a calendar day number ("the 16th").
+_ORDINAL_SUFFIXES = {"st", "nd", "rd", "th"}
+# Words that turn a bare number into a duration/count/percentage claim when they immediately
+# follow it, e.g. "55 minutes", "11 tasks", "2 members", "3 completed tasks".
+_DURATION_COUNT_UNIT_WORDS = {
+    "second", "seconds", "sec", "secs",
+    "minute", "minutes", "min", "mins",
+    "hour", "hours", "hr", "hrs",
+    "day", "days", "week", "weeks",
+    "task", "tasks", "member", "members",
+    "invitation", "invitations", "item", "items",
+    "event", "events", "change", "changes",
+    "time", "times", "total", "totals",
+    "count", "counts", "percent", "percentage",
+    "completed", "active", "pending", "remaining",
+}
+
+# Captures a digit run together with any letters glued directly onto it (no space), so a
+# duration suffix ("4h"), an ordinal ("16th"), and an identifier ("user123", "v2") can all be
+# told apart from a bare, standalone number.
+_NUMBER_TOKEN_RE = re.compile(r"(?P<prefix>[A-Za-z]*)(?P<number>\d[\d,.]*)(?P<percent>%)?(?P<suffix>[A-Za-z]*)")
 
 
 def _to_status_schemas(events: List[ProviderStatusEvent]) -> List[ProviderStatusEventSchema]:
@@ -263,14 +291,62 @@ def _known_quotable_strings(snapshot: StructuredSnapshot) -> Set[str]:
 _QUOTED_RE = re.compile(r'["“]([^"”\n]{2,160})["”]')
 
 
+def _find_unsupported_numeric_claims(text_blob: str, allowed_numbers: Set[str]) -> List[str]:
+    """Finds digit sequences in `text_blob` that read as a duration/count/percentage claim
+    -- e.g. "55 minutes", "11%", "4h 48m", "2 members", "3 completed tasks" -- while leaving
+    alone digits that are merely part of an identifier, not a claim:
+    - an email address (e.g. "araysh55@gmail.com") -- stripped out entirely up front,
+    - a quoted string (e.g. a task titled "Task 55") -- already validated separately as an
+      exact match against the snapshot, so any digits inside are not a fresh claim,
+    - a version/username-style token where letters are glued directly onto the number (e.g.
+      "API v2", "user123") -- an identifier, not a metric.
+    A bare ordinal ("the 25th") is still required to match one of the window's own calendar
+    boundary days (rule 10) -- gluing "th"/"st"/"nd"/"rd" onto a number doesn't exempt it.
+    """
+    scan_text = _EMAIL_RE.sub(" ", _QUOTED_RE.sub(" ", text_blob))
+    claims: List[str] = []
+    for match in _NUMBER_TOKEN_RE.finditer(scan_text):
+        number = match.group("number")
+        cleaned = number.replace(",", "")
+        if not cleaned:
+            continue
+        prefix = match.group("prefix")
+        suffix_lower = match.group("suffix").lower()
+        raw = match.group(0)
+
+        if match.group("percent"):
+            claims.append(raw)
+            continue
+        if suffix_lower in _DURATION_UNIT_SUFFIXES:
+            claims.append(raw)  # "4h", "48m", "30sec" -- a duration, however it's spelled.
+            continue
+        if suffix_lower in _ORDINAL_SUFFIXES and not prefix:
+            if cleaned not in allowed_numbers:
+                claims.append(raw)  # an ordinal day outside the window's own boundaries.
+            continue
+        if prefix or suffix_lower:
+            continue  # letters glued onto the number ("user123", "v2") -- an identifier.
+        if cleaned in allowed_numbers:
+            continue
+
+        tail = scan_text[match.end() : match.end() + 40].strip().lower()
+        next_word = tail.split(" ", 1)[0].strip(".,!?;:\"'") if tail else ""
+        if next_word in _DURATION_COUNT_UNIT_WORDS:
+            claims.append(f"{number} {next_word}")
+
+    return claims
+
+
 def _validate_narrative(narrative: SummaryNarrative, snapshot: StructuredSnapshot) -> List[str]:
     """Returns a list of human-readable validation warnings; empty means the narrative is clean.
 
     Two independent checks, both grounded directly in the snapshot:
     1. Every `members[].user_id` must be a real member of the workspace.
-    2. The narrative must contain no numbers at all, other than the reporting window's own
-       calendar day/month/year (rule 10) -- the AI never owns a duration, count, or percentage,
-       so there is nothing to "derive correctly": any other digit is by definition unsupported.
+    2. The narrative must contain no unsupported numeric claim -- a duration, a count, or a
+       percentage -- other than the reporting window's own calendar day/month/year (rule 10);
+       the AI never owns any of those, so there is nothing to "derive correctly". Digits that
+       are merely part of an identifier (an email address, a quoted title, a version/username
+       token) are not claims and must not be flagged -- see `_find_unsupported_numeric_claims`.
     3. Every double-quoted string must be an exact, known task/parent title or invited email
        (rule 11) -- a quoted string that matches nothing in the snapshot is a fabricated claim.
     """
@@ -291,15 +367,9 @@ def _validate_narrative(narrative: SummaryNarrative, snapshot: StructuredSnapsho
     )
 
     allowed_numbers = _allowed_calendar_tokens(snapshot)
-    for raw in _NUMBER_RE.findall(text_blob):
-        cleaned = raw.rstrip("%").replace(",", "")
-        if not cleaned or len(cleaned) <= 1:
-            # Single digits ("a 1-on-1", list markers, etc.) aren't worth flagging.
-            continue
-        if cleaned in allowed_numbers:
-            continue
+    for claim in _find_unsupported_numeric_claims(text_blob, allowed_numbers):
         warnings.append(
-            f"unsupported numeric claim '{raw}' -- the AI must never state a duration, count, "
+            f"unsupported numeric claim '{claim}' -- the AI must never state a duration, count, "
             "or percentage; those are rendered by the application"
         )
 
