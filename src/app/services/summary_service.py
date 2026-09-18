@@ -65,33 +65,53 @@ invitations sent or membership changes. Your job is to turn this into a factual 
 NOT a productivity evaluation. Never call this window "yesterday" or "today" -- refer to it as \
 "the reporting period" or "the previous 24 hours", since it does not align to calendar days.
 
+THE APPLICATION, NOT YOU, OWNS EVERY NUMBER. All durations, percentages, and counts (focused
+time, task counts, completion counts, progress percentages, invitation counts, member counts,
+totals) are already computed by the backend and are rendered directly in the UI from the
+structured snapshot -- never from your text. Your only job is the human-readable "what happened
+and to what", never the "how much" or "how many". This means you must NOT:
+- calculate, sum, subtract, average, or estimate a duration or count,
+- convert seconds to minutes/hours, or round a value differently than the snapshot,
+- state a percentage (including progress_start/progress_end) -- describe progress qualitatively
+  instead (e.g. "made further progress on X, which remains in progress") or omit it,
+- restate a total, a count, or a time value in any form, even one taken verbatim from the
+  snapshot -- the app already shows it,
+- invent a number that appears nowhere in the snapshot.
+The ONLY digits you may ever write are calendar date components (day/month/year) when naturally
+referring to the reporting window, e.g. "between the 16th and the 17th" -- never a duration, a
+percentage, or a count.
+
 What to cover, per member (in `members[].note`):
-- What they created, worked on, completed, or skipped -- named by title.
+- What they created, worked on, completed, or skipped -- named by its EXACT title, wrapped in
+  double quotes, e.g. completed "Research and Learn". Never paraphrase or abbreviate a title.
 - What they were assigned, and what they assigned to others (by name).
-- Any invitations they sent, including the invitation's current status (still pending / accepted
-  / rejected -- never invent or guess a status, and never mention a rejection reason).
-- How task progress changed, ONLY when `task_activity[].progress_start`/`progress_end` are both
-  present for that task -- e.g. "progress moved from 20% to 80%". If only one of those two values
-  is present (or neither), do not state a progress change for that task at all.
+- Any invitations they sent, quoting the invited email address, including the invitation's
+  current status (still pending / accepted / rejected -- never invent or guess a status, and
+  never mention a rejection reason).
+- Whether task progress changed, described qualitatively only (see above) -- never with a
+  percentage.
 - When a member's `events` show a clear order (e.g. created, then started, then assigned), prefer
   a natural chronological sentence ("created X, worked on it, then assigned it to Y") over an
   unordered list of facts.
 - A subtask (an event or task_activity entry with a non-null `parent_title`) should always be
-  described with its parent, e.g. "worked on **Authentication** under **School Management MVP**" --
+  described with its parent, e.g. worked on "Authentication" under "School Management MVP" --
   never just the subtask name alone.
 - If a member has no events and no task_activity, say so plainly (e.g. "no recorded activity")
   instead of padding or omitting them.
+- Do not repeat or restate `focused_seconds`, task counts, or completion counts -- the UI already
+  shows these directly beside your narrative.
 
 Workspace-level activity (in `workspace_changes_summary`): only write this when
 `workspace_changes` in the snapshot is non-empty (has any invitations, joins, removals, or task
-counts) -- 1-2 sentences covering what changed, e.g. task creation/completion counts, members
-joining/leaving. Leave `workspace_changes_summary` as an empty string when there is nothing to
-report there, even if members[] has activity.
+counts) -- 1-2 sentences covering what changed, without restating the counts themselves (the UI
+already lists them), e.g. "the workspace saw new task activity and a membership change." Leave
+`workspace_changes_summary` as an empty string when there is nothing to report there, even if
+members[] has activity.
 
 Hard rules (violating any of these makes the narrative unusable):
-1. Never invent an event, task, member, time value, or progress value.
-2. Never state a fact (a name, a number, a status, an invitation outcome) that is not present in
-   the snapshot.
+1. Never invent an event, task, member, time value, count, or progress value.
+2. Never state a fact (a name, a status, an invitation outcome) that is not present in the
+   snapshot.
 3. Never attribute work to anyone other than the member whose `events`/`task_activity` it appears
    under -- the snapshot already resolved historical attribution correctly (it reflects who
    actually did the work during the reporting window, not who a task is currently assigned to);
@@ -105,14 +125,16 @@ Hard rules (violating any of these makes the narrative unusable):
 7. Use neutral, factual language. No productivity judgments of any kind -- do not say someone
    was "productive", "behind", "did well", "should have done more", or compare members against
    each other. Report what was recorded, nothing more:
-     - Write: "Ali recorded 2h of focused work on Complete Module 2."
+     - Write: "Ali completed \\"Complete Module 2\\"."
      - Never: "Ali only worked 2h." / "Abrar was the most productive this period."
 8. No motivational filler, no exclamation marks, no emoji.
 9. Every `user_id` you use in `members[]` MUST be exactly one of the member ids listed in the
    snapshot's `members[]`. Do not invent member ids or add an entry for someone not present.
-10. Every number, time, or percentage you state must be exactly derivable from the snapshot
-    (already-provided totals, counts, or progress_start/progress_end values) -- never calculate,
-    round differently, or estimate a new figure.
+10. Never write a number, digit, or percentage anywhere in your output except a calendar
+    day/month/year, as described above. If you find yourself about to write a duration, a count,
+    or a percentage -- stop, and describe it in words instead, or omit it.
+11. Every double-quoted string you write MUST be an exact task title or invited email address
+    copied verbatim from the snapshot. Never invent or paraphrase a quoted title or email.
 """
 
 _NUMBER_RE = re.compile(r"\d[\d,.]*%?")
@@ -208,54 +230,50 @@ def _fallback_narrative(snapshot: StructuredSnapshot) -> SummaryNarrative:
     )
 
 
-def _expected_numeric_tokens(snapshot: StructuredSnapshot) -> Set[str]:
-    """Numbers that are legitimately derivable from the snapshot -- used to sanity-check
-    that the AI narrative isn't inventing new figures."""
-    tokens: Set[str] = {str(snapshot.total_focused_seconds), str(len(snapshot.members))}
-
-    total_hours, total_rem = divmod(snapshot.total_focused_seconds, 3600)
-    tokens.update({str(total_hours), str(total_rem // 60)})
-
-    # The window's boundary dates are legitimately restated in prose (e.g. "on the 17th" or
-    # "into the 18th"), not a fabricated figure -- allow both report_start's and report_end's
-    # day/month/year components (a rolling 24h window can span two calendar dates).
+def _allowed_calendar_tokens(snapshot: StructuredSnapshot) -> Set[str]:
+    """The ONLY numbers the AI is allowed to write: the reporting window's own calendar
+    day/month/year components (e.g. "between the 16th and the 17th"). Deliberately does NOT
+    include any duration, count, or percentage -- the app owns every one of those and the AI
+    must never attempt to reproduce, derive, or restate them (see SYSTEM_PROMPT rule 10)."""
+    tokens: Set[str] = set()
     for boundary in (snapshot.report_start, snapshot.report_end):
         tokens.update({str(boundary.day), str(boundary.month), str(boundary.year)})
-
-    for member in snapshot.members:
-        tokens.update({str(member.focused_seconds), str(len(member.task_activity)), str(len(member.events))})
-        hours, rem = divmod(member.focused_seconds, 3600)
-        tokens.update({str(hours), str(rem // 60)})
-        completed = sum(1 for t in member.task_activity if t.status_end == TaskStatus.completed)
-        in_progress = sum(1 for t in member.task_activity if t.status_end == TaskStatus.in_progress)
-        skipped = sum(1 for t in member.task_activity if t.status_end == TaskStatus.skipped)
-        tokens.update({str(completed), str(in_progress), str(skipped)})
-        for t in member.task_activity:
-            t_hours, t_rem = divmod(t.focused_seconds, 3600)
-            tokens.update({str(t.focused_seconds), str(t_hours), str(t_rem // 60)})
-            if t.progress_start is not None:
-                tokens.add(str(t.progress_start))
-            if t.progress_end is not None:
-                tokens.add(str(t.progress_end))
-
-    changes = snapshot.workspace_changes
-    tokens.update(
-        {
-            str(len(changes.invitations)),
-            str(len(changes.members_joined)),
-            str(len(changes.members_removed)),
-            str(changes.tasks_created),
-            str(changes.tasks_completed),
-            str(changes.tasks_skipped),
-            str(changes.tasks_deleted),
-        }
-    )
-
     return tokens
 
 
+def _known_quotable_strings(snapshot: StructuredSnapshot) -> Set[str]:
+    """Every exact task title, parent title, and invited email address the AI is allowed to
+    put in double quotes (see SYSTEM_PROMPT rule 11) -- anything else quoted is a fabrication."""
+    values: Set[str] = set()
+    for member in snapshot.members:
+        for t in member.task_activity:
+            values.add(t.title)
+            if t.parent_title:
+                values.add(t.parent_title)
+        for e in member.events:
+            if e.task_title:
+                values.add(e.task_title)
+            if e.parent_title:
+                values.add(e.parent_title)
+    for inv in snapshot.workspace_changes.invitations:
+        values.add(inv.invited_email)
+    return {v.strip().lower() for v in values if v.strip()}
+
+
+_QUOTED_RE = re.compile(r'["“]([^"”\n]{2,160})["”]')
+
+
 def _validate_narrative(narrative: SummaryNarrative, snapshot: StructuredSnapshot) -> List[str]:
-    """Returns a list of human-readable validation warnings; empty means the narrative is clean."""
+    """Returns a list of human-readable validation warnings; empty means the narrative is clean.
+
+    Two independent checks, both grounded directly in the snapshot:
+    1. Every `members[].user_id` must be a real member of the workspace.
+    2. The narrative must contain no numbers at all, other than the reporting window's own
+       calendar day/month/year (rule 10) -- the AI never owns a duration, count, or percentage,
+       so there is nothing to "derive correctly": any other digit is by definition unsupported.
+    3. Every double-quoted string must be an exact, known task/parent title or invited email
+       (rule 11) -- a quoted string that matches nothing in the snapshot is a fabricated claim.
+    """
     warnings: List[str] = []
 
     known_ids = snapshot.known_member_ids
@@ -263,7 +281,6 @@ def _validate_narrative(narrative: SummaryNarrative, snapshot: StructuredSnapsho
         if note.user_id not in known_ids:
             warnings.append(f"members references unknown member_id '{note.user_id}'")
 
-    expected_numbers = _expected_numeric_tokens(snapshot)
     text_blob = " ".join(
         [
             narrative.overall_summary,
@@ -272,14 +289,28 @@ def _validate_narrative(narrative: SummaryNarrative, snapshot: StructuredSnapsho
             *narrative.highlights,
         ]
     )
+
+    allowed_numbers = _allowed_calendar_tokens(snapshot)
     for raw in _NUMBER_RE.findall(text_blob):
         cleaned = raw.rstrip("%").replace(",", "")
         if not cleaned or len(cleaned) <= 1:
             # Single digits ("a 1-on-1", list markers, etc.) aren't worth flagging.
             continue
-        if cleaned in expected_numbers:
+        if cleaned in allowed_numbers:
             continue
-        warnings.append(f"figure '{raw}' in narrative is not traceable to the snapshot")
+        warnings.append(
+            f"unsupported numeric claim '{raw}' -- the AI must never state a duration, count, "
+            "or percentage; those are rendered by the application"
+        )
+
+    known_quotable = _known_quotable_strings(snapshot)
+    for quoted in _QUOTED_RE.findall(text_blob):
+        normalized = quoted.strip().rstrip(".,!?;:").lower()
+        if normalized and normalized not in known_quotable:
+            warnings.append(
+                f"quoted text \"{quoted}\" does not match any task title, parent title, or "
+                "invited email in the snapshot"
+            )
 
     return warnings
 
@@ -333,11 +364,19 @@ class SummaryService:
                     temperature=settings.SUMMARY_TEMPERATURE,
                 )
             except Exception as exc:
-                logger.error(f"❌ Structured summary generation failed after gateway exhaustion: {exc}")
+                logger.error(
+                    f"report_id=- workspace_id={snapshot.workspace_id} generation_attempt={attempt} "
+                    f"model=- generation_status=error validation_status=- "
+                    f"validation_failure_reason=- ❌ gateway exhausted: {exc}"
+                )
                 break
 
             warnings = _validate_narrative(narrative, snapshot)
             if not warnings:
+                logger.info(
+                    f"report_id=- workspace_id={snapshot.workspace_id} generation_attempt={attempt} "
+                    f"model={model} generation_status=ok validation_status=passed"
+                )
                 return SummaryGenerateResponse(
                     snapshot=snapshot,
                     narrative=narrative,
@@ -353,21 +392,29 @@ class SummaryService:
                 )
 
             last_warnings = warnings
-            logger.warning(f"⚠️ Narrative validation failed (attempt {attempt}/{max_attempts}): {warnings}")
+            logger.warning(
+                f"report_id=- workspace_id={snapshot.workspace_id} generation_attempt={attempt} "
+                f"model={model} generation_status=ok validation_status=failed "
+                f"validation_failure_reason={'; '.join(warnings)!r}"
+            )
             if attempt < max_attempts:
                 messages.append(
                     HumanMessage(
                         content=(
-                            "Your previous answer referenced data not present in the snapshot: "
+                            "Your previous answer violated these rules: "
                             + "; ".join(warnings)
-                            + ". Try again, using ONLY facts from the snapshot above."
+                            + ". Remove every unsupported number/quote and try again, describing "
+                            "only what happened -- never how much or how many."
                         )
                     )
                 )
 
         logger.error(
-            f"❌ Falling back to the deterministic template for workspace={snapshot.workspace_id} "
-            f"window={snapshot.report_start}..{snapshot.report_end} after {attempts_made} attempt(s)."
+            f"report_id=- workspace_id={snapshot.workspace_id} generation_attempt={attempts_made} "
+            f"model=- generation_status=fallback validation_status=exhausted "
+            f"validation_failure_reason={'; '.join(last_warnings)!r} "
+            f"window={snapshot.report_start}..{snapshot.report_end} -- "
+            "falling back to the deterministic template."
         )
         return SummaryGenerateResponse(
             snapshot=snapshot,

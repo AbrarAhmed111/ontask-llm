@@ -185,7 +185,9 @@ class MemberNarrative(BaseModel):
         description=(
             "A few sentences narrating this member's activity during the reporting window: what they created, worked on, "
             "completed, were assigned, assigned to others, and any invitations they sent -- "
-            "in a sensible chronological order when the sequence matters. Neutral, factual tone."
+            "in a sensible chronological order when the sequence matters. Neutral, factual tone. "
+            "Never states a duration, count, or percentage -- the app renders those directly; task/parent "
+            "titles and invited emails are named exactly and wrapped in double quotes."
         ),
     )
 
@@ -206,19 +208,27 @@ class SummaryNarrative(BaseModel):
     """
 
     overall_summary: str = Field(
-        ..., description="2-4 sentence neutral overview of the workspace's activity during the reporting window"
+        ...,
+        description=(
+            "2-4 sentence neutral overview of the workspace's activity during the reporting window. "
+            "Never restates a duration, count, or percentage -- only the reporting window's own "
+            "calendar day/month/year may appear as digits."
+        ),
     )
     members: List[MemberNarrative] = Field(default_factory=list)
     workspace_changes_summary: str = Field(
         default="",
         description=(
             "1-2 neutral sentences on workspace-level changes (invitations sent/answered, members "
-            "joining/leaving) if any occurred within the reporting window; empty string if workspace_changes was empty"
+            "joining/leaving) if any occurred within the reporting window, WITHOUT restating the counts "
+            "themselves (the UI lists them); empty string if workspace_changes was empty"
         ),
     )
     highlights: List[str] = Field(
         default_factory=list,
-        description="Short factual bullet highlights (e.g. notable completions); no opinions",
+        description=(
+            "Short factual bullet highlights (e.g. notable completions); no opinions, no numbers"
+        ),
     )
 
 
