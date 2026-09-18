@@ -64,6 +64,12 @@ class TaskActivityEntry(BaseModel):
     parent_title: Optional[str] = Field(
         default=None, description="Set when this entry is a subtask; None for a standalone/parent task"
     )
+    goal_id: Optional[str] = Field(
+        default=None,
+        description="The workspace Goal this task belongs to, if any -- never inferred, only ever the real "
+        "goals.name at report time (see supabase/migrations/0027_daily_report_goal_awareness.sql)",
+    )
+    goal_name: Optional[str] = None
     focused_seconds: int = Field(ge=0)
     progress_start: Optional[int] = Field(
         default=None, ge=0, le=100, description="Only set if a progress_changed event occurred within the reporting window"

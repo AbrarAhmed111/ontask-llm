@@ -99,6 +99,10 @@ What to cover, per member (in `members[].note`):
 - A subtask (an event or task_activity entry with a non-null `parent_title`) should always be
   described with its parent, e.g. worked on "Authentication" under "School Management MVP" --
   never just the subtask name alone.
+- A task_activity entry with a non-null `goal_name` belongs to that workspace Goal -- mention it
+  when it adds useful context, e.g. worked on "Authentication", part of the goal "School
+  Management MVP". Only ever use the exact `goal_name` given; never invent, guess, or imply a
+  goal for a task where `goal_id`/`goal_name` are null.
 - If a member has no events and no task_activity, say so plainly (e.g. "no recorded activity")
   instead of padding or omitting them.
 - Do not repeat or restate `focused_seconds`, task counts, or completion counts -- the UI already
@@ -136,8 +140,9 @@ Hard rules (violating any of these makes the narrative unusable):
 10. Never write a number, digit, or percentage anywhere in your output except a calendar
     day/month/year, as described above. If you find yourself about to write a duration, a count,
     or a percentage -- stop, and describe it in words instead, or omit it.
-11. Every double-quoted string you write MUST be an exact task title or invited email address
-    copied verbatim from the snapshot. Never invent or paraphrase a quoted title or email.
+11. Every double-quoted string you write MUST be an exact task title, goal name, or invited
+    email address copied verbatim from the snapshot. Never invent or paraphrase a quoted title,
+    goal name, or email.
 """
 
 _EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
@@ -270,14 +275,17 @@ def _allowed_calendar_tokens(snapshot: StructuredSnapshot) -> Set[str]:
 
 
 def _known_quotable_strings(snapshot: StructuredSnapshot) -> Set[str]:
-    """Every exact task title, parent title, and invited email address the AI is allowed to
-    put in double quotes (see SYSTEM_PROMPT rule 11) -- anything else quoted is a fabrication."""
+    """Every exact task title, parent title, goal name, and invited email address the AI is
+    allowed to put in double quotes (see SYSTEM_PROMPT rule 11) -- anything else quoted is a
+    fabrication."""
     values: Set[str] = set()
     for member in snapshot.members:
         for t in member.task_activity:
             values.add(t.title)
             if t.parent_title:
                 values.add(t.parent_title)
+            if t.goal_name:
+                values.add(t.goal_name)
         for e in member.events:
             if e.task_title:
                 values.add(e.task_title)
